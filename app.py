@@ -92,6 +92,14 @@ def format_trace(original: str, result: LoopResult) -> str:
             verdict_label = "✅ PASS" if outbound.passed else "⚠️ FLAG"
             lines.append(f"#### Attempt {attempt_num} — {verdict_label}")
 
+            # For flagged attempts, show the rejected response so the reader
+            # can see what was generated and why it was sent back for correction.
+            if not outbound.passed and attempt_num <= len(result.all_responses):
+                rejected_text = result.all_responses[attempt_num - 1]
+                lines.append("<details><summary>Rejected response</summary>\n")
+                lines.append(f"{rejected_text}\n")
+                lines.append("</details>\n")
+
             claims = outbound.all_claims or [
                 {"claim": iss.get("claim", "?"), "verdict": "FLAG", "reason": iss.get("reason", "?")}
                 for iss in outbound.issues

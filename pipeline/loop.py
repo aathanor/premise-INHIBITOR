@@ -37,6 +37,7 @@ class LoopResult:
     inbound: InboundResult | None = None
     final_outbound: OutboundResult | None = None
     all_outbounds: list[OutboundResult] = field(default_factory=list)  # one per attempt
+    all_responses: list[str] = field(default_factory=list)             # one per attempt
     # Human-readable summary of what the inhibitor did this turn
     status_lines: list[str] = field(default_factory=list)
 
@@ -163,6 +164,7 @@ async def run_agentic(
         verdict = await check_outbound(user_query, response)
         result.final_outbound = verdict
         result.all_outbounds.append(verdict)
+        result.all_responses.append(response)
 
         if verdict.passed:
             if attempt > 1:
