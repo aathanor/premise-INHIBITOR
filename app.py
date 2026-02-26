@@ -18,6 +18,7 @@ import uvicorn
 
 from backend import app as fastapi_app         # FastAPI instance
 from config import APP_HOST, APP_PORT, GENERATION_MODEL, CHECKER_MODEL, MAX_ATTEMPTS, REWRITE_INBOUND
+from pipeline.checker import check_inbound, InboundResult
 from pipeline.loop import run_agentic, LoopResult
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,19 @@ def _content_str(content) -> str:
                 parts.append(part)
         return "".join(parts)
     return str(content)
+
+
+def _history_tuples(chat_history: list[dict]) -> list[tuple[str, str]]:
+    """Convert Gradio messages list → [(user, assistant), ...] tuples for the loop."""
+    tuples: list[tuple[str, str]] = []
+    pending_user: str | None = None
+    for msg in chat_history:
+        if msg["role"] == "user":
+            pending_user = _content_str(msg["content"])
+        elif msg["role"] == "assistant" and pending_user is not None:
+            tuples.append((pending_user, _content_str(msg["content"])))
+            pending_user = None
+    return tuples
 
 
 # ── Trace formatter ───────────────────────────────────────────────────────
@@ -118,40 +132,115 @@ def format_trace(original: str, result: LoopResult) -> str:
     return "\n".join(lines)
 
 
-# ── Gradio handler ────────────────────────────────────────────────────────
+# ── Gradio handlers ───────────────────────────────────────────────────────
 
-async def respond(
+# Shared sentinel for "clear this state" returns
+_HIDE = gr.update(visible=False)
+_SHOW = gr.update(visible=True)
+
+
+async def handle_submit(
     message: str,
     chat_history: list[dict],
-) -> tuple[str, list[dict], str]:
+) -> tuple:
     """
-    Called by Gradio on each user submission.
+    First step: run inbound check only.
 
-    Returns:
-        (cleared_input, updated_history, trace_markdown)
+    - If false premises are found → show the review panel and pause.
+    - Otherwise → run the full pipeline immediately.
+
+    Outputs (in order):
+        msg_box, chatbot, trace_panel,
+        premise_review (Group), orig_label, rewrite_box,
+        pending_query (State), pending_hist (State), pending_inbound (State)
     """
+    _blank = ("", chat_history, "", _HIDE, "", "", None, None, None)
     if not message.strip():
-        return "", chat_history, ""
+        return _blank
 
-    # Convert Gradio messages list → [(user, assistant), ...] tuples for the loop.
-    # _content_str handles Gradio 6 storing content as list-of-parts instead of str.
-    history_tuples: list[tuple[str, str]] = []
-    pending_user: str | None = None
-    for msg in chat_history:
-        if msg["role"] == "user":
-            pending_user = _content_str(msg["content"])
-        elif msg["role"] == "assistant" and pending_user is not None:
-            history_tuples.append((pending_user, _content_str(msg["content"])))
-            pending_user = None
+    hist = _history_tuples(chat_history)
 
-    loop_result = await run_agentic(message, history_tuples)
+    if REWRITE_INBOUND:
+        inbound = await check_inbound(message)
+        if inbound.has_premise_error:
+            # Pause: show review panel so the user can accept, edit, or discard
+            # the suggested rewrite before generation runs.
+            return (
+                "",                          # clear input
+                chat_history,                # chatbot unchanged
+                "",                          # trace unchanged
+                _SHOW,                       # show review panel
+                f"**Original:** {message}",  # orig_label
+                inbound.rewritten_query,     # rewrite_box (editable)
+                message,                     # pending_query state
+                hist,                        # pending_hist state
+                inbound,                     # pending_inbound state
+            )
+        # Inbound passed — fall through to full pipeline with the checked result
+        result = await run_agentic(message, hist, precomputed_inbound=inbound)
+    else:
+        result = await run_agentic(message, hist)
 
-    chat_history = chat_history + [
+    new_history = chat_history + [
         {"role": "user", "content": message},
-        {"role": "assistant", "content": loop_result.response},
+        {"role": "assistant", "content": result.response},
     ]
-    trace = format_trace(message, loop_result)
-    return "", chat_history, trace
+    return (
+        "",
+        new_history,
+        format_trace(message, result),
+        _HIDE, "", "",
+        None, None, None,
+    )
+
+
+async def handle_keep(
+    pending_query: str,
+    pending_hist: list,
+    pending_inbound: InboundResult,
+    chat_history: list[dict],
+) -> tuple:
+    """User chose to keep their original query despite the flagged premises."""
+    result = await run_agentic(
+        pending_query, pending_hist,
+        precomputed_inbound=pending_inbound,
+        generation_query=pending_query,   # original, not the rewrite
+    )
+    new_history = chat_history + [
+        {"role": "user", "content": pending_query},
+        {"role": "assistant", "content": result.response},
+    ]
+    return (
+        new_history,
+        format_trace(pending_query, result),
+        _HIDE, "", "",
+        None, None, None,
+    )
+
+
+async def handle_use_rewrite(
+    rewrite_text: str,
+    pending_query: str,
+    pending_hist: list,
+    pending_inbound: InboundResult,
+    chat_history: list[dict],
+) -> tuple:
+    """User chose to send the (possibly hand-edited) rewritten query."""
+    result = await run_agentic(
+        pending_query, pending_hist,
+        precomputed_inbound=pending_inbound,
+        generation_query=rewrite_text,    # rewrite (may have been edited)
+    )
+    new_history = chat_history + [
+        {"role": "user", "content": pending_query},
+        {"role": "assistant", "content": result.response},
+    ]
+    return (
+        new_history,
+        format_trace(pending_query, result),
+        _HIDE, "", "",
+        None, None, None,
+    )
 
 
 # ── Gradio UI layout ──────────────────────────────────────────────────────
@@ -189,6 +278,21 @@ questions and in the model's answers — before they propagate.
             )
             send_btn = gr.Button("Send", variant="primary", scale=1)
 
+        # ── Premise review panel (hidden until a false premise is detected) ──
+        with gr.Group(visible=False) as premise_review:
+            gr.Markdown("### ⚠️ False premise detected")
+            orig_label = gr.Markdown("")
+            gr.Markdown("**Suggested rewrite** *(you can edit this before sending)*:")
+            rewrite_box = gr.Textbox(
+                label="",
+                show_label=False,
+                interactive=True,
+                lines=2,
+            )
+            with gr.Row():
+                keep_btn = gr.Button("Keep original", variant="secondary")
+                use_btn = gr.Button("Use this rewrite", variant="primary")
+
         clear_btn = gr.Button("Clear conversation", variant="secondary")
 
         with gr.Accordion("Inhibitor trace", open=True):
@@ -196,17 +300,43 @@ questions and in the model's answers — before they propagate.
                 value="*Send a message to see the inhibitor trace.*"
             )
 
-        # Wire up submit (Enter key or button click)
-        msg_box.submit(
-            fn=respond,
-            inputs=[msg_box, chatbot],
-            outputs=[msg_box, chatbot, trace_panel],
+        # ── Shared state for the two-step review flow ──────────────────────
+        pending_query   = gr.State(None)
+        pending_hist    = gr.State(None)
+        pending_inbound = gr.State(None)
+
+        # Outputs shared by submit (first step) ─────────────────────────────
+        _submit_outputs = [
+            msg_box, chatbot, trace_panel,
+            premise_review, orig_label, rewrite_box,
+            pending_query, pending_hist, pending_inbound,
+        ]
+
+        msg_box.submit(fn=handle_submit,
+                       inputs=[msg_box, chatbot],
+                       outputs=_submit_outputs)
+        send_btn.click(fn=handle_submit,
+                       inputs=[msg_box, chatbot],
+                       outputs=_submit_outputs)
+
+        # Outputs shared by keep / use buttons (second step) ─────────────────
+        _review_outputs = [
+            chatbot, trace_panel,
+            premise_review, orig_label, rewrite_box,
+            pending_query, pending_hist, pending_inbound,
+        ]
+
+        keep_btn.click(
+            fn=handle_keep,
+            inputs=[pending_query, pending_hist, pending_inbound, chatbot],
+            outputs=_review_outputs,
         )
-        send_btn.click(
-            fn=respond,
-            inputs=[msg_box, chatbot],
-            outputs=[msg_box, chatbot, trace_panel],
+        use_btn.click(
+            fn=handle_use_rewrite,
+            inputs=[rewrite_box, pending_query, pending_hist, pending_inbound, chatbot],
+            outputs=_review_outputs,
         )
+
         clear_btn.click(
             fn=lambda: ([], "", "*Send a message to see the inhibitor trace.*"),
             inputs=[],

@@ -108,13 +108,20 @@ def _build_messages(
 async def run_agentic(
     user_query: str,
     history: list[tuple[str, str]],
+    precomputed_inbound: InboundResult | None = None,
+    generation_query: str | None = None,
 ) -> LoopResult:
     """
     Run the full premise-inhibition loop for one user turn.
 
     Args:
-        user_query: The raw text the user just submitted.
-        history:    List of (user, assistant) string pairs from prior turns.
+        user_query:          The raw text the user just submitted.
+        history:             List of (user, assistant) string pairs from prior turns.
+        precomputed_inbound: If the caller already ran the inbound check (e.g. to
+                             show a review UI), pass the result here to skip re-running it.
+        generation_query:    The query to actually send to the generation model.
+                             Defaults to the inbound rewrite (or user_query if no rewrite).
+                             Only used when precomputed_inbound is provided.
 
     Returns:
         LoopResult with the final response and inhibition metadata.
@@ -124,7 +131,23 @@ async def run_agentic(
 
     # ── Step 1: Inbound check ─────────────────────────────────────────────
     working_query = user_query
-    if REWRITE_INBOUND:
+    if precomputed_inbound is not None:
+        # Inbound check was already run externally (user reviewed it in the UI).
+        result.inbound = precomputed_inbound
+        working_query = generation_query if generation_query is not None else user_query
+        if precomputed_inbound.has_premise_error:
+            n = len(precomputed_inbound.errors)
+            if working_query != user_query:
+                status.append(
+                    f"query rewritten ({n} premise {'error' if n == 1 else 'errors'} corrected)"
+                )
+            else:
+                status.append(
+                    f"query kept as-is ({n} premise {'error' if n == 1 else 'errors'} noted)"
+                )
+        else:
+            status.append("query OK")
+    elif REWRITE_INBOUND:
         inbound = await check_inbound(user_query)
         result.inbound = inbound
 
