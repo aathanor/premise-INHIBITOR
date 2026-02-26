@@ -11,6 +11,7 @@ Flow for each user turn:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 import httpx
@@ -45,6 +46,19 @@ class LoopResult:
         return "\n\n---\n*Inhibitor:* " + " · ".join(self.status_lines)
 
 
+# ── Thinking-tag stripper ─────────────────────────────────────────────────
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+def _strip_think(text: str) -> str:
+    """
+    Remove qwen3-style <think>…</think> blocks from a response before it is
+    stored in conversation history.  Keeping raw thinking tokens in history
+    causes Ollama to return 400 on the next turn if the block was truncated.
+    """
+    return _THINK_RE.sub("", text).strip()
+
+
 # ── Ollama generation helper ──────────────────────────────────────────────
 
 async def _generate(
@@ -60,6 +74,10 @@ async def _generate(
     }
     async with httpx.AsyncClient(timeout=180.0) as client:
         resp = await client.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
+        if not resp.is_success:
+            logger.error(
+                "Ollama /api/chat returned %d: %s", resp.status_code, resp.text[:500]
+            )
         resp.raise_for_status()
         return resp.json()["message"]["content"]
 
@@ -131,7 +149,8 @@ async def run_agentic(
         messages = _build_messages(prompt, history)
 
         try:
-            response = await _generate(messages)
+            raw = await _generate(messages)
+            response = _strip_think(raw)
         except httpx.HTTPError as exc:
             logger.error("Generation request failed: %s", exc)
             result.response = f"[Error contacting Ollama: {exc}]"

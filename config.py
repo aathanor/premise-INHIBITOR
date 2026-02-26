@@ -18,11 +18,11 @@ CHECKER_MODEL: str = os.getenv("CHECKER_MODEL", "qwen2.5:14b")
 # Ollama generation parameters
 OLLAMA_OPTIONS: dict = {
     "temperature": 0.7,
-    "num_predict": 1024,
+    "num_predict": 4096,   # generous — qwen3 thinking blocks can be long
 }
 CHECKER_OPTIONS: dict = {
     "temperature": 0.0,   # deterministic for judgements
-    "num_predict": 512,
+    "num_predict": 2048,
 }
 
 # ── Agentic loop ───────────────────────────────────────────────────────────
