@@ -60,15 +60,11 @@ async def respond(
 # ── Gradio UI layout ──────────────────────────────────────────────────────
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(
-        title="Premise INHIBITOR",
-        theme=gr.themes.Soft(),
-        css=".gradio-container { max-width: 860px; margin: auto; }",
-    ) as demo:
+    with gr.Blocks(title="Premise INHIBITOR") as demo:
 
         gr.Markdown(
             f"""
-# 🛡 Premise INHIBITOR
+# Premise INHIBITOR
 **Agentic pipeline** that detects and corrects false premises — both in your
 questions and in the model's answers — before they propagate.
 
@@ -84,9 +80,7 @@ Replies annotated with *Inhibitor: …* show what was caught and corrected this 
 
         chatbot = gr.Chatbot(
             label="Conversation",
-            bubble_full_width=False,
             height=500,
-            render_markdown=True,
         )
 
         with gr.Row():
