@@ -28,32 +28,41 @@ logger = logging.getLogger(__name__)
 
 async def respond(
     message: str,
-    chat_history: list[list[str]],
-) -> tuple[str, list[list[str]]]:
+    chat_history: list[dict],
+) -> tuple[str, list[dict]]:
     """
     Called by Gradio on each user submission.
 
-    Args:
-        message:      The new user message.
-        chat_history: List of [user, assistant] pairs accumulated so far.
+    Gradio 6 uses the "messages" format: each entry is a dict with
+    {"role": "user"|"assistant", "content": "..."}.
 
     Returns:
-        Tuple of (cleared_input, updated_history) so Gradio updates the UI.
+        Tuple of (cleared_input, updated_history).
     """
     if not message.strip():
         return "", chat_history
 
-    # Convert Gradio [[user, assistant], ...] → [(user, assistant), ...]
-    history_tuples = [tuple(pair) for pair in chat_history if len(pair) == 2]
+    # Convert Gradio messages list → [(user, assistant), ...] tuples for the loop.
+    # Pair up consecutive user/assistant messages from history.
+    history_tuples: list[tuple[str, str]] = []
+    pending_user: str | None = None
+    for msg in chat_history:
+        if msg["role"] == "user":
+            pending_user = msg["content"]
+        elif msg["role"] == "assistant" and pending_user is not None:
+            history_tuples.append((pending_user, msg["content"]))
+            pending_user = None
 
     loop_result = await run_agentic(message, history_tuples)
 
-    # Build display text: response + optional inhibitor badge
     display = loop_result.response
     if loop_result.status_badge:
         display += loop_result.status_badge
 
-    chat_history = chat_history + [[message, display]]
+    chat_history = chat_history + [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": display},
+    ]
     return "", chat_history
 
 
@@ -81,6 +90,7 @@ Replies annotated with *Inhibitor: …* show what was caught and corrected this 
         chatbot = gr.Chatbot(
             label="Conversation",
             height=500,
+            type="messages",   # Gradio 6 dict-based message format
         )
 
         with gr.Row():
@@ -107,7 +117,7 @@ Replies annotated with *Inhibitor: …* show what was caught and corrected this 
             outputs=[msg_box, chatbot],
         )
         clear_btn.click(
-            fn=lambda: ([], ""),
+            fn=lambda: ([], ""),   # empty messages list + clear textbox
             inputs=[],
             outputs=[chatbot, msg_box],
         )
