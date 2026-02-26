@@ -90,7 +90,6 @@ Replies annotated with *Inhibitor: …* show what was caught and corrected this 
         chatbot = gr.Chatbot(
             label="Conversation",
             height=500,
-            type="messages",   # Gradio 6 dict-based message format
         )
 
         with gr.Row():
