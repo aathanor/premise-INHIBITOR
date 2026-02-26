@@ -11,17 +11,62 @@ or simply:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 
 import gradio as gr
 import uvicorn
 
 from backend import app as fastapi_app         # FastAPI instance
-from config import APP_HOST, APP_PORT, GENERATION_MODEL, MAX_ATTEMPTS, REWRITE_INBOUND
-from pipeline.loop import run_agentic
+from config import APP_HOST, APP_PORT, GENERATION_MODEL, CHECKER_MODEL, MAX_ATTEMPTS, REWRITE_INBOUND
+from pipeline.loop import run_agentic, LoopResult
 
 logger = logging.getLogger(__name__)
+
+
+# ── Trace formatter ───────────────────────────────────────────────────────
+
+def format_trace(original: str, result: LoopResult) -> str:
+    """
+    Build a markdown string showing exactly what the inhibitor did this turn.
+    Displayed in the trace panel below the chatbot.
+    """
+    lines: list[str] = ["## Inhibitor trace — last turn\n"]
+
+    # ── INBOUND ──────────────────────────────────────────────────────────
+    lines.append("### Inbound (query)")
+    if not REWRITE_INBOUND:
+        lines.append("*Inbound checking is disabled.*\n")
+    elif result.inbound is None:
+        lines.append("*Not run.*\n")
+    elif not result.inbound.has_premise_error:
+        lines.append(f"- **Original query:** {original}")
+        lines.append("- **Verdict:** ✅ no premise errors found\n")
+    else:
+        lines.append(f"- **Original query:** {original}")
+        lines.append(f"- **Rewritten query:** {result.inbound.rewritten_query}")
+        lines.append(f"- **Errors found ({len(result.inbound.errors)}):**")
+        for i, err in enumerate(result.inbound.errors, 1):
+            lines.append(f"  {i}. **False premise:** _{err.get('premise', '?')}_")
+            lines.append(f"     **Correction:** {err.get('correction', '?')}")
+        lines.append("")
+
+    # ── OUTBOUND ─────────────────────────────────────────────────────────
+    lines.append("### Outbound (response)")
+    lines.append(f"- **Attempts:** {result.attempts} / {MAX_ATTEMPTS}")
+
+    if result.final_outbound is None:
+        lines.append("- **Verdict:** *not run (generation failed)*\n")
+    elif result.final_outbound.passed:
+        lines.append("- **Verdict:** ✅ PASS — no false claims detected\n")
+    else:
+        lines.append("- **Verdict:** ⚠️ FLAG — issues remain after max attempts")
+        lines.append(f"- **Issues ({len(result.final_outbound.issues)}):**")
+        for i, issue in enumerate(result.final_outbound.issues, 1):
+            lines.append(f"  {i}. **Claim:** _{issue.get('claim', '?')}_")
+            lines.append(f"     **Reason:** {issue.get('reason', '?')}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ── Gradio handler ────────────────────────────────────────────────────────
@@ -29,21 +74,17 @@ logger = logging.getLogger(__name__)
 async def respond(
     message: str,
     chat_history: list[dict],
-) -> tuple[str, list[dict]]:
+) -> tuple[str, list[dict], str]:
     """
     Called by Gradio on each user submission.
 
-    Gradio 6 uses the "messages" format: each entry is a dict with
-    {"role": "user"|"assistant", "content": "..."}.
-
     Returns:
-        Tuple of (cleared_input, updated_history).
+        (cleared_input, updated_history, trace_markdown)
     """
     if not message.strip():
-        return "", chat_history
+        return "", chat_history, ""
 
     # Convert Gradio messages list → [(user, assistant), ...] tuples for the loop.
-    # Pair up consecutive user/assistant messages from history.
     history_tuples: list[tuple[str, str]] = []
     pending_user: str | None = None
     for msg in chat_history:
@@ -55,15 +96,12 @@ async def respond(
 
     loop_result = await run_agentic(message, history_tuples)
 
-    display = loop_result.response
-    if loop_result.status_badge:
-        display += loop_result.status_badge
-
     chat_history = chat_history + [
         {"role": "user", "content": message},
-        {"role": "assistant", "content": display},
+        {"role": "assistant", "content": loop_result.response},
     ]
-    return "", chat_history
+    trace = format_trace(message, loop_result)
+    return "", chat_history, trace
 
 
 # ── Gradio UI layout ──────────────────────────────────────────────────────
@@ -79,17 +117,16 @@ questions and in the model's answers — before they propagate.
 
 | Setting | Value |
 |---|---|
-| Model | `{GENERATION_MODEL}` |
+| Generation model | `{GENERATION_MODEL}` |
+| Checker model | `{CHECKER_MODEL}` |
 | Max correction attempts | `{MAX_ATTEMPTS}` |
 | Inbound rewriting | `{"on" if REWRITE_INBOUND else "off"}` |
-
-Replies annotated with *Inhibitor: …* show what was caught and corrected this turn.
 """
         )
 
         chatbot = gr.Chatbot(
             label="Conversation",
-            height=500,
+            height=480,
         )
 
         with gr.Row():
@@ -104,21 +141,26 @@ Replies annotated with *Inhibitor: …* show what was caught and corrected this 
 
         clear_btn = gr.Button("Clear conversation", variant="secondary")
 
+        with gr.Accordion("Inhibitor trace", open=True):
+            trace_panel = gr.Markdown(
+                value="*Send a message to see the inhibitor trace.*"
+            )
+
         # Wire up submit (Enter key or button click)
         msg_box.submit(
             fn=respond,
             inputs=[msg_box, chatbot],
-            outputs=[msg_box, chatbot],
+            outputs=[msg_box, chatbot, trace_panel],
         )
         send_btn.click(
             fn=respond,
             inputs=[msg_box, chatbot],
-            outputs=[msg_box, chatbot],
+            outputs=[msg_box, chatbot, trace_panel],
         )
         clear_btn.click(
-            fn=lambda: ([], ""),   # empty messages list + clear textbox
+            fn=lambda: ([], "", "*Send a message to see the inhibitor trace.*"),
             inputs=[],
-            outputs=[chatbot, msg_box],
+            outputs=[chatbot, msg_box, trace_panel],
         )
 
     return demo
