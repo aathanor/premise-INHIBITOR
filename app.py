@@ -59,33 +59,53 @@ def format_trace(original: str, result: LoopResult) -> str:
         lines.append("*Inbound checking is disabled.*\n")
     elif result.inbound is None:
         lines.append("*Not run.*\n")
-    elif not result.inbound.has_premise_error:
-        lines.append(f"- **Original query:** {original}")
-        lines.append("- **Verdict:** ✅ no premise errors found\n")
     else:
+        inbound = result.inbound
         lines.append(f"- **Original query:** {original}")
-        lines.append(f"- **Rewritten query:** {result.inbound.rewritten_query}")
-        lines.append(f"- **Errors found ({len(result.inbound.errors)}):**")
-        for i, err in enumerate(result.inbound.errors, 1):
-            lines.append(f"  {i}. **False premise:** _{err.get('premise', '?')}_")
-            lines.append(f"     **Correction:** {err.get('correction', '?')}")
+        if inbound.has_premise_error:
+            lines.append(f"- **Rewritten query:** {inbound.rewritten_query}")
+
+        premises = inbound.all_premises or [
+            {"premise": e.get("premise", "?"), "correct": False, "correction": e.get("correction", "?")}
+            for e in inbound.errors
+        ]
+        if premises:
+            lines.append(f"- **Premises identified ({len(premises)}):**")
+            for i, p in enumerate(premises, 1):
+                if p.get("correct", True):
+                    lines.append(f"  {i}. ✅ _{p.get('premise', '?')}_")
+                else:
+                    lines.append(f"  {i}. ❌ _{p.get('premise', '?')}_")
+                    lines.append(f"     **Correction:** {p.get('correction', '?')}")
+        else:
+            lines.append("- **Verdict:** ✅ no premises flagged")
         lines.append("")
 
     # ── OUTBOUND ─────────────────────────────────────────────────────────
     lines.append("### Outbound (response)")
-    lines.append(f"- **Attempts:** {result.attempts} / {MAX_ATTEMPTS}")
+    lines.append(f"- **Attempts:** {result.attempts} / {MAX_ATTEMPTS}\n")
 
-    if result.final_outbound is None:
-        lines.append("- **Verdict:** *not run (generation failed)*\n")
-    elif result.final_outbound.passed:
-        lines.append("- **Verdict:** ✅ PASS — no false claims detected\n")
+    if not result.all_outbounds:
+        lines.append("*Not run (generation failed).*\n")
     else:
-        lines.append("- **Verdict:** ⚠️ FLAG — issues remain after max attempts")
-        lines.append(f"- **Issues ({len(result.final_outbound.issues)}):**")
-        for i, issue in enumerate(result.final_outbound.issues, 1):
-            lines.append(f"  {i}. **Claim:** _{issue.get('claim', '?')}_")
-            lines.append(f"     **Reason:** {issue.get('reason', '?')}")
-        lines.append("")
+        for attempt_num, outbound in enumerate(result.all_outbounds, 1):
+            verdict_label = "✅ PASS" if outbound.passed else "⚠️ FLAG"
+            lines.append(f"#### Attempt {attempt_num} — {verdict_label}")
+
+            claims = outbound.all_claims or [
+                {"claim": iss.get("claim", "?"), "verdict": "FLAG", "reason": iss.get("reason", "?")}
+                for iss in outbound.issues
+            ]
+            if claims:
+                for i, c in enumerate(claims, 1):
+                    if c.get("verdict", "PASS") == "PASS":
+                        lines.append(f"  {i}. ✅ _{c.get('claim', '?')}_")
+                    else:
+                        lines.append(f"  {i}. ❌ _{c.get('claim', '?')}_")
+                        lines.append(f"     **Reason:** {c.get('reason', '?')}")
+            else:
+                lines.append("  *No claims identified.*")
+            lines.append("")
 
     return "\n".join(lines)
 

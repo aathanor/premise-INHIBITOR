@@ -11,8 +11,8 @@ from __future__ import annotations
 # ── Inbound: check + rewrite user query ───────────────────────────────────
 
 INBOUND_CHECK_SYSTEM = """\
-You are a premise auditor. Your job is to identify false, misleading, or \
-unverifiable factual premises embedded in a user's question.
+You are a premise auditor. Your job is to identify ALL presuppositions embedded \
+in a user's question — both correct and false.
 
 A "premise error" is a presupposition the question takes for granted that is \
 actually false or contested — e.g. "Why did Einstein fail maths as a child?" \
@@ -21,6 +21,13 @@ presupposes he did, but he did not.
 Respond with VALID JSON only, no markdown fences, in this exact schema:
 {
   "has_premise_error": true | false,
+  "all_premises": [
+    {
+      "premise": "<a presupposition found in the question>",
+      "correct": true | false,
+      "correction": "<factual correction — include only when correct is false>"
+    }
+  ],
   "errors": [
     {
       "premise": "<the false presupposition>",
@@ -29,6 +36,8 @@ Respond with VALID JSON only, no markdown fences, in this exact schema:
   ],
   "rewritten_query": "<the query with false premises neutralised, or the original if none>"
 }
+
+"errors" must contain only the false premises (those entries in all_premises where correct is false).
 """
 
 INBOUND_CHECK_USER = """\
@@ -43,9 +52,8 @@ OUTBOUND_CHECK_SYSTEM = """\
 You are a fact-checking assistant. You will be given an AI-generated response \
 and the original question that prompted it.
 
-Your task: decide whether the response contains or reinforces any false factual \
-premises — statements presented as established fact that are actually false, \
-misleading, or based on a faulty presupposition in the original question.
+Your task: evaluate ALL distinct factual claims in the response, deciding for \
+each whether it is accurate or contains a false / misleading premise.
 
 Do NOT flag:
   - opinions or predictions clearly marked as such
@@ -55,6 +63,13 @@ Do NOT flag:
 Respond with VALID JSON only, no markdown fences:
 {
   "verdict": "PASS" | "FLAG",
+  "all_claims": [
+    {
+      "claim": "<a factual claim from the response>",
+      "verdict": "PASS" | "FLAG",
+      "reason": "<why it is false — include only when verdict is FLAG>"
+    }
+  ],
   "issues": [
     {
       "claim": "<the problematic claim from the response>",
@@ -62,6 +77,9 @@ Respond with VALID JSON only, no markdown fences:
     }
   ]
 }
+
+Top-level "verdict" is FLAG if any claim is FLAG, PASS otherwise.
+"issues" must contain only the flagged claims (a subset of all_claims where verdict is FLAG).
 """
 
 OUTBOUND_CHECK_USER = """\

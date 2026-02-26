@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 class InboundResult:
     has_premise_error: bool
     errors: list[dict] = field(default_factory=list)
+    all_premises: list[dict] = field(default_factory=list)  # all premises, correct and false
     rewritten_query: str = ""      # equals original query when no errors found
     raw: str = ""                  # raw model output, for debugging
 
@@ -38,6 +39,7 @@ class InboundResult:
 class OutboundResult:
     verdict: str                   # "PASS" | "FLAG"
     issues: list[dict] = field(default_factory=list)
+    all_claims: list[dict] = field(default_factory=list)    # all claims evaluated
     raw: str = ""
 
     @property
@@ -127,6 +129,7 @@ async def check_inbound(query: str) -> InboundResult:
     return InboundResult(
         has_premise_error=bool(parsed.get("has_premise_error", False)),
         errors=parsed.get("errors", []),
+        all_premises=parsed.get("all_premises", []),
         rewritten_query=parsed.get("rewritten_query") or query,
         raw=raw,
     )
@@ -152,5 +155,6 @@ async def check_outbound(query: str, response: str) -> OutboundResult:
     return OutboundResult(
         verdict=verdict,
         issues=parsed.get("issues", []),
+        all_claims=parsed.get("all_claims", []),
         raw=raw,
     )
