@@ -23,6 +23,27 @@ from pipeline.loop import run_agentic, LoopResult
 logger = logging.getLogger(__name__)
 
 
+# ── Gradio content helper ─────────────────────────────────────────────────
+
+def _content_str(content) -> str:
+    """
+    Gradio 6 stores chatbot message content as either a plain string or a
+    list of content-part dicts, e.g. [{"type": "text", "text": "..."}].
+    Ollama expects a plain string, so normalise here.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(part.get("text") or part.get("content") or "")
+            elif isinstance(part, str):
+                parts.append(part)
+        return "".join(parts)
+    return str(content)
+
+
 # ── Trace formatter ───────────────────────────────────────────────────────
 
 def format_trace(original: str, result: LoopResult) -> str:
@@ -85,13 +106,14 @@ async def respond(
         return "", chat_history, ""
 
     # Convert Gradio messages list → [(user, assistant), ...] tuples for the loop.
+    # _content_str handles Gradio 6 storing content as list-of-parts instead of str.
     history_tuples: list[tuple[str, str]] = []
     pending_user: str | None = None
     for msg in chat_history:
         if msg["role"] == "user":
-            pending_user = msg["content"]
+            pending_user = _content_str(msg["content"])
         elif msg["role"] == "assistant" and pending_user is not None:
-            history_tuples.append((pending_user, msg["content"]))
+            history_tuples.append((pending_user, _content_str(msg["content"])))
             pending_user = None
 
     loop_result = await run_agentic(message, history_tuples)
